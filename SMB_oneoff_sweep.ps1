@@ -13,10 +13,10 @@
 
     Run it with no arguments and it asks:
 
-        Input server name (e.g. ozssu02.muv.is.keysight.com):
+        Input server name (e.g. server1.example.com):
 
     Paste a server name (FQDN, short name or IPv4). Pasting a UNC such as
-    \\ozssu02.muv.is.keysight.com\9063_LAB also works -- the share part is
+    \\server1.example.com\9063_LAB also works -- the share part is
     stripped (spaces inside a UNC/URL belong to the share name, they do not
     separate servers). Several servers can be pasted on one line, separated by
     commas (or spaces for bare host names), and the prompt repeats until you
@@ -82,7 +82,7 @@
 .PARAMETER OutDir
     Root folder for the reports. Default: a "Reports" folder next to the script.
     Every server gets its own subfolder named after it, e.g.
-        Reports\ozssu02.muv.is.keysight.com\OpenShares_ozssu02.muv.is.keysight.com_20261015_141200.txt
+        Reports\server1.example.com\OpenShares_server1.example.com_20261015_141200.txt
     so repeated runs and many servers stay organised (files are timestamped,
     nothing is ever overwritten).
 
@@ -128,13 +128,13 @@
     (prompts: Input server name)
 
 .EXAMPLE
-    .\SMB_oneoff_sweep.ps1 ozssu02.muv.is.keysight.com
+    .\SMB_oneoff_sweep.ps1 server1.example.com
 
 .EXAMPLE
     .\SMB_oneoff_sweep.ps1 -ServerFile .\servers.txt -OutDir C:\Temp\share-audit
 
 .EXAMPLE
-    .\SMB_oneoff_sweep.ps1 ozssu02.muv.is.keysight.com -ShowAll -SampleCount 5
+    .\SMB_oneoff_sweep.ps1 server1.example.com -ShowAll -SampleCount 5
 #>
 
 #Requires -Version 5.1
@@ -335,7 +335,7 @@ function Resolve-ServerInput {
 function Read-ServerNames {
     param([bool]$First)
     while ($true) {
-        $prompt = if ($First) { 'Input server name (e.g. ozssu02.muv.is.keysight.com)' }
+        $prompt = if ($First) { 'Input server name (e.g. server1.example.com)' }
                   else        { 'Input another server name (or press Enter to exit)' }
         $raw = Read-Host $prompt
         if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
