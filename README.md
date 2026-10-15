@@ -271,3 +271,98 @@ Scan something bigger than the default guard allows:
   the instant the file opens, overwriting whatever EPPlus cached. Every
   other sheet/value is correct from the moment the script finishes — this
   affects only that one cached cell, only before first open.
+
+--------------------------------------------------------------------------------------------
+
+  # SMB_oneoff_sweep.ps1
+
+Find out which SMB shares on a server are actually **open** to the account you run it as, without clicking through every folder in Explorer. Lists the accessible shares, rates how widely each one is exposed, and writes a report you can paste or attach into an email.
+
+Read-only. No credentials, no modules, no admin rights. Uses your current Windows logon.
+
+> Use only on servers you are authorized to assess.
+
+## Requirements
+
+- Windows with PowerShell 5.1 or later
+- Network access to the server on TCP 445
+
+## Usage
+
+```powershell
+.\SMB_oneoff_sweep.ps1
+```
+
+It prompts for a server name. Paste a hostname, an FQDN, an IPv4 address, or a `\\server\share` path (the share part is ignored). Separate several servers with commas.
+
+```powershell
+.\SMB_oneoff_sweep.ps1 fileserver01.corp.example.com
+.\SMB_oneoff_sweep.ps1 server1, server2, server3
+.\SMB_oneoff_sweep.ps1 -ServerFile .\servers.txt        # one server per line, # for comments
+.\SMB_oneoff_sweep.ps1 fileserver01 -ShowAll            # also list denied shares
+.\SMB_oneoff_sweep.ps1 fileserver01 -OutDir D:\audit    # change the reports folder
+```
+
+If scripts are blocked: `powershell -ExecutionPolicy Bypass -File .\SMB_oneoff_sweep.ps1`
+
+### Options
+
+| Option | Default | Purpose |
+|---|---|---|
+| `-Server` | prompt | One or more servers |
+| `-ServerFile` | | Text file of servers |
+| `-OutDir` | `Reports` next to the script | Root folder for reports |
+| `-ShowAll` | off | Also list denied and non-folder shares |
+| `-NoReport` | off | Terminal output only |
+| `-SampleCount` | `0` | Include the first N entry names per open share (off by default; names can be sensitive) |
+| `-ShareTimeoutSec` | `20` | Per-share timeout |
+| `-ShareThreads` | `16` | Shares tested in parallel |
+
+Exit codes: `0` done, `1` a server could not be checked or bad input, `2` scan finished but reports could not be written.
+
+## Example output
+
+```
+ ACCESSIBLE SHARES (3)
+  1. \\fileserver01.corp.example.com\DataStorage
+       Exposure: BROAD-WRITE (Everyone: FullControl)  |  Items: 2  |  Owner: CORP\jsmith
+  2. \\fileserver01.corp.example.com\Public
+       Exposure: BROAD-READ (NT AUTHORITY\Authenticated Users: Read)  |  Items: 81  |  Owner: CORP\jsmith
+```
+
+## Reports
+
+Each server gets its own folder. Files are timestamped, so re-scans never overwrite earlier results.
+
+```
+Reports\
+  fileserver01.corp.example.com\
+    OpenShares_fileserver01.corp.example.com_20261015_141200.txt    paste into an email
+    OpenShares_fileserver01.corp.example.com_20261015_141200.html   paste into Outlook as a table
+    OpenShares_fileserver01.corp.example.com_20261015_141200.csv    attach / open in Excel
+```
+
+## How it works
+
+**Readable is tested for real.** For every share the script opens the root folder and lists it. A share is only reported as accessible if that listing succeeded, so "accessible" means the account running the script could actually read it.
+
+**Writable is inferred, not tested.** The script never writes anything to a share. It reads the permissions on the share's root folder and checks whether a broad group has an Allow entry with write-type rights.
+
+- Broad groups: Everyone, Authenticated Users, BUILTIN\Users, Domain Users, Domain Guests, Guests, Anonymous Logon, NETWORK.
+- Write-type rights: write or append data, delete, delete subfolders and files, change permissions, take ownership, Modify, Full Control.
+
+| Rating | Meaning |
+|---|---|
+| `BROAD-WRITE` | A broad group appears to have write access. Fix first. |
+| `BROAD-READ` | A broad group has read access only. |
+| `LIMITED` | No broad group on the permissions (a large group can still be listed; check the `.csv`/`.html`). |
+| `UNKNOWN` | The permissions could not be read. |
+| `DEFAULT` | Windows default share (`C$`, `ADMIN$`, ...). Not rated. |
+
+## Limitations
+
+- **Results reflect the account you run it as.** For an "open to all staff" view, run it as a standard user, not an admin. The script warns when the account is a Domain/Enterprise/Schema Admin, or when `C$`/`ADMIN$` opens (admin rights see everything).
+- **Ratings come from the folder permissions, not share-level permissions.** Share-level permissions and deny entries are not evaluated (that needs admin on the server), so `BROAD-WRITE` is a strong indicator, not proof.
+- **"Could not be tested" is not "closed".** Shares that time out or are offline are always listed separately.
+- Windows only (uses the Win32 `NetShareEnum` API).
+
