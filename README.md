@@ -274,7 +274,7 @@ Scan something bigger than the default guard allows:
 
 --------------------------------------------------------------------------------------------
 
-  # SMB_oneoff_sweep.ps1
+ # SMB_oneoff_sweep
 
 Find out which SMB shares on a server are actually **open** to the account you run it as, without clicking through every folder in Explorer. Lists the accessible shares, rates how widely each one is exposed, and writes a report you can paste or attach into an email.
 
@@ -313,6 +313,7 @@ If scripts are blocked: `powershell -ExecutionPolicy Bypass -File .\SMB_oneoff_s
 | `-ServerFile` | | Text file of servers |
 | `-OutDir` | `Reports` next to the script | Root folder for reports |
 | `-ShowAll` | off | Also list denied and non-folder shares |
+| `-NoWriteTest` | off | Skip the write check; rate exposure from folder permissions alone |
 | `-NoReport` | off | Terminal output only |
 | `-SampleCount` | `0` | Include the first N entry names per open share (off by default; names can be sensitive) |
 | `-ShareTimeoutSec` | `20` | Per-share timeout |
@@ -323,11 +324,18 @@ Exit codes: `0` done, `1` a server could not be checked or bad input, `2` scan f
 ## Example output
 
 ```
+ SUMMARY
+   ACCESSIBLE (open) ............ 3   <-- listed below
+   WRITABLE (verified) .......... 1   (this account can create files)
+
  ACCESSIBLE SHARES (3)
   1. \\fileserver01.corp.example.com\DataStorage
-       Exposure: BROAD-WRITE (Everyone: FullControl)  |  Items: 2  |  Owner: CORP\jsmith
-  2. \\fileserver01.corp.example.com\Public
-       Exposure: BROAD-READ (NT AUTHORITY\Authenticated Users: Read)  |  Items: 81  |  Owner: CORP\jsmith
+       Exposure: BROAD-WRITE (Everyone: FullControl)  |  Write: WRITE CONFIRMED  |  Items: 2  |  Owner: CORP\jsmith
+  2. \\fileserver01.corp.example.com\Archive
+       Exposure: BROAD-READ (Everyone: FullControl)  |  Write: no write (verified)  |  Items: 40  |  Owner: CORP\jsmith
+       Note    : Root ACL grants write to Everyone, but the server refused write access: share-level
+                 permissions, a deny entry or a read-only volume block it for that whole group.
+                 Rated BROAD-READ, not BROAD-WRITE.
 ```
 
 ## Reports
@@ -346,14 +354,13 @@ Reports\
 
 **Readable is tested for real.** For every share the script opens the root folder and lists it. A share is only reported as accessible if that listing succeeded, so "accessible" means the account running the script could actually read it.
 
-**Writable is inferred, not tested.** The script never writes anything to a share. It reads the permissions on the share's root folder and checks whether a broad group has an Allow entry with write-type rights.
+**Writable is tested for real.** The script asks the server for a write-capable handle on the share root and closes it again. Nothing is created — but to answer, the server has to run the full access check: share permissions, folder permissions, deny entries, your token. It asks about every right the rating below counts as write (create a file, create a folder, delete the contents, delete the share, change permissions, take ownership), so the two can be compared like for like. A bare `WRITE CONFIRMED` means files can be created; a narrower grant is named — `WRITE CONFIRMED (folders only)`, `(delete contents)`.
 
-- Broad groups: Everyone, Authenticated Users, BUILTIN\Users, Domain Users, Domain Guests, Guests, Anonymous Logon, NETWORK.
-- Write-type rights: write or append data, delete, delete subfolders and files, change permissions, take ownership, Modify, Full Control.
+**Exposure says who else.** The root folder's permissions are read separately, to see whether a broad group (Everyone, Authenticated Users, BUILTIN\Users, Domain Users, Domain Guests, Guests, Anonymous Logon, NETWORK) holds write-type rights. The two are then cross-checked: a share whose permissions read `Everyone: FullControl` but which the server refuses to write is rated `BROAD-READ`, with the reason stated. That combination is common on NAS appliances and Samba servers, where share-level permissions override the folder permissions.
 
 | Rating | Meaning |
 |---|---|
-| `BROAD-WRITE` | A broad group appears to have write access. Fix first. |
+| `BROAD-WRITE` | A broad group has write access and the server grants it. Fix first. |
 | `BROAD-READ` | A broad group has read access only. |
 | `LIMITED` | No broad group on the permissions (a large group can still be listed; check the `.csv`/`.html`). |
 | `UNKNOWN` | The permissions could not be read. |
@@ -362,7 +369,7 @@ Reports\
 ## Limitations
 
 - **Results reflect the account you run it as.** For an "open to all staff" view, run it as a standard user, not an admin. The script warns when the account is a Domain/Enterprise/Schema Admin, or when `C$`/`ADMIN$` opens (admin rights see everything).
-- **Ratings come from the folder permissions, not share-level permissions.** Share-level permissions and deny entries are not evaluated (that needs admin on the server), so `BROAD-WRITE` is a strong indicator, not proof.
+- **The write check answers for your account only.** Another account has different group memberships. An admin can also satisfy it through backup/restore privilege — one more reason to run as a standard user.
+- **Share-level permissions still cannot be read** (that needs admin on the server). The write check works around this for your own account, but the `LIMITED` rating and the ACL listings reflect folder permissions only.
 - **"Could not be tested" is not "closed".** Shares that time out or are offline are always listed separately.
 - Windows only (uses the Win32 `NetShareEnum` API).
-
