@@ -13,10 +13,10 @@
 
     Run it with no arguments and it asks:
 
-        Input server name (e.g. server1.example.com):
+        Input server name (e.g. ozssu02.muv.is.keysight.com):
 
     Paste a server name (FQDN, short name or IPv4). Pasting a UNC such as
-    \\server1.example.com\9063_LAB also works -- the share part is
+    \\ozssu02.muv.is.keysight.com\9063_LAB also works -- the share part is
     stripped (spaces inside a UNC/URL belong to the share name, they do not
     separate servers). Several servers can be pasted on one line, separated by
     commas (or spaces for bare host names), and the prompt repeats until you
@@ -29,7 +29,17 @@
       3. Opens each disk share root read-only (directory listing) in parallel,
          with a hard per-share timeout so one dead DFS target / offline volume
          cannot stall the run -- it is reported as "could not be tested".
-      4. For every share that opened, reads the root folder's NTFS owner and
+      4. Asks the server for WRITE access on every share root that opened: a
+         handle is opened with "create a file in this folder" rights and closed
+         again straight away. Nothing is created, written or deleted -- but to
+         answer, the server has to run the whole access check (share-level
+         permissions AND the NTFS ACL AND deny entries AND this account's
+         token), so the result is verified rather than inferred:
+             WRITE CONFIRMED  the server granted a write-capable handle
+             no write         the server refused write access
+             unverified       the check could not be completed
+         Disable with -NoWriteTest.
+      5. For every share that opened, reads the root folder's NTFS owner and
          ACL and flags whether Everyone / Authenticated Users / Domain Users /
          BUILTIN\Users / NETWORK / Anonymous / Guests have access, and whether
          that access includes write/modify/full control:
@@ -39,7 +49,13 @@
                           be listed -- review the ACL in the .csv/.html)
              UNKNOWN      root ACL could not be read
              DEFAULT      Windows default share (C$, ADMIN$, ...): not rated
-      5. Prints the accessible shares to the terminal (Custom shares first,
+         Steps 4 and 5 are cross-checked. When the ACL grants write to a group
+         this account is certainly in (Everyone, Authenticated Users, NETWORK,
+         its own Domain Users) but step 4 was refused, something that applies
+         to that entire group is blocking it -- share-level permissions, a deny
+         entry, or a read-only volume -- so the share is reported as BROAD-READ
+         with the reason, instead of as a BROAD-WRITE false positive.
+      6. Prints the accessible shares to the terminal (Custom shares first,
          worst exposure first; default/system shares last) plus any shares
          that could not be tested (unknown, NOT closed), then writes the same
          list to <OutDir>\<server>\OpenShares_<server>_<time>.txt (paste-ready),
@@ -51,7 +67,10 @@
 
     SAFETY NOTES
       - Read-only. Nothing is ever created, written, modified or deleted on a
-        remote share; the check is "can the root folder be listed".
+        remote share. The two checks are "can the root folder be listed" and
+        "would the server grant a write handle on it" -- the second opens a
+        handle and closes it again, which changes nothing, but it is the only
+        way to get a truthful answer (see below).
       - No credentials are collected, stored or transmitted -- the script
         rides your current Windows logon session.
       - "Accessible" means accessible to THE ACCOUNT RUNNING THE SCRIPT. For an
@@ -60,10 +79,20 @@
         warns when the account is in Domain Admins / Enterprise Admins /
         Schema Admins, and again per server whenever C$/ADMIN$ can be opened
         (proof of admin rights on that server).
-      - Exposure flags come from the NTFS ACL on the share root. Share-level
-        permissions and deny entries are not evaluated (that needs admin on
-        the server), so BROAD-* is a strong indicator, not a proof of write
-        access.
+      - Exposure flags come from the NTFS ACL on the share root, and the
+        share-level permissions sitting in front of them cannot be read without
+        admin on the server. That gap is why a root ACL reading
+        Everyone:FullControl so often belongs to a share nobody can write to --
+        especially on NAS appliances and Samba servers, which synthesize the
+        ACL they report. The write check closes the gap for the scanning
+        account: it is proof when it succeeds, and when it fails on a share
+        whose ACL grants write to a group this account is in, the share is
+        reported BROAD-READ with the reason rather than as a BROAD-WRITE false
+        positive.
+      - What the write check cannot answer is whether some OTHER account can
+        write: a different account has different group memberships. It is also
+        satisfiable through backup/restore privilege, which an admin account
+        has -- one more reason to run as a standard user.
       - Share names / comments come from the remote server, so they are
         neutralized against CSV/Excel formula injection (CWE-1236) and
         HTML-encoded in the HTML report; control characters are stripped.
@@ -82,7 +111,7 @@
 .PARAMETER OutDir
     Root folder for the reports. Default: a "Reports" folder next to the script.
     Every server gets its own subfolder named after it, e.g.
-        Reports\server1.example.com\OpenShares_server1.example.com_20261015_141200.txt
+        Reports\ozssu02.muv.is.keysight.com\OpenShares_ozssu02.muv.is.keysight.com_20261015_141200.txt
     so repeated runs and many servers stay organised (files are timestamped,
     nothing is ever overwritten).
 
@@ -105,6 +134,12 @@
     share (default 0 = off). Off by default because file/folder names can
     themselves be sensitive and these reports get emailed.
 
+.PARAMETER NoWriteTest
+    Skip the write check and rate exposure from the root ACL alone (the old
+    behaviour). The check creates nothing, so there is rarely a reason to turn
+    it off -- but it does make one extra SMB open per accessible share, and
+    some audit configurations log it.
+
 .PARAMETER ShowAll
     Also list the shares that are NOT accessible and the ones that are not
     folder shares (terminal, txt, html, csv). Default: accessible shares only,
@@ -115,6 +150,13 @@
     Terminal output only; do not write report files.
 
 .NOTES
+    v1.1 added the verified write check (-NoWriteTest turns it off). Exposure is
+    no longer rated from the root ACL alone, which is what produced BROAD-WRITE
+    false positives: a NAS or Samba share often reports Everyone:FullControl on
+    a volume that is exported read-only. Shares like that are now rated
+    BROAD-READ with the reason stated, and only a share the server really grants
+    write on is reported as writable.
+
     Exit codes: 0 = finished (including quitting at the prompt);
                 1 = a server could not be checked (DNS / TCP 445 / share list),
                     or no valid server / bad -ServerFile / bad -OutDir;
@@ -128,13 +170,17 @@
     (prompts: Input server name)
 
 .EXAMPLE
-    .\SMB_oneoff_sweep.ps1 server1.example.com
+    .\SMB_oneoff_sweep.ps1 ozssu02.muv.is.keysight.com
 
 .EXAMPLE
     .\SMB_oneoff_sweep.ps1 -ServerFile .\servers.txt -OutDir C:\Temp\share-audit
 
 .EXAMPLE
-    .\SMB_oneoff_sweep.ps1 server1.example.com -ShowAll -SampleCount 5
+    .\SMB_oneoff_sweep.ps1 ozssu02.muv.is.keysight.com -ShowAll -SampleCount 5
+
+.EXAMPLE
+    .\SMB_oneoff_sweep.ps1 ozssu02.muv.is.keysight.com -NoWriteTest
+    (rate exposure from the root ACL alone -- no write check)
 #>
 
 #Requires -Version 5.1
@@ -150,6 +196,7 @@ param(
     [ValidateRange(200, 30000)] [int]$PortTimeoutMs   = 3000,
     [ValidateRange(1, 100000)]  [int]$MaxItemsCounted = 1000,
     [ValidateRange(0, 50)]      [int]$SampleCount     = 0,
+    [switch]$NoWriteTest,
     [switch]$ShowAll,
     [switch]$NoReport
 )
@@ -157,7 +204,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $ToolName    = 'SMB One-Off Sweep'
-$ToolVersion = '1.0'
+$ToolVersion = '1.1'
 
 # Windows-created shares. Everything else is a "Custom" share someone set up on
 # purpose.
@@ -229,6 +276,50 @@ namespace SmbOpenShare {
                 if (buf != IntPtr.Zero) NetApiBufferFree(buf);
             }
             return result;
+        }
+    }
+}
+'@
+}
+
+# ---------------------------------------------------------------------------
+# Write-access probe. Opens the share root asking for "create a file in this
+# folder" rights and closes the handle again immediately: nothing is created,
+# written or changed, but to answer the server must run the FULL access check
+# -- share-level permissions, the NTFS ACL, deny entries and this account's
+# token, all of it. That is what the root ACL alone cannot tell us: a NAS or a
+# Windows share can carry Everyone:FullControl on NTFS and still be exported
+# read-only at the share level.
+# Its own type guard (not the one above) so a re-run in a session that already
+# loaded NetApi still gets this type.
+# ---------------------------------------------------------------------------
+if (-not ('SmbOpenShare.WriteProbe' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace SmbOpenShare {
+    public static class WriteProbe {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateFileW(string path, uint access, uint share,
+            IntPtr security, uint disposition, uint flags, IntPtr template);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        // 'access' is normally FILE_ADD_FILE (0x2) | FILE_ADD_SUBDIRECTORY (0x4) --
+        // the rights needed to put anything into the folder. OPEN_EXISTING (3) can
+        // never create it, and FILE_FLAG_BACKUP_SEMANTICS (0x02000000) is simply what
+        // CreateFile requires in order to open a directory at all.
+        // Returns 0 when the access was granted, otherwise the Win32 error code.
+        public static int Probe(string directory, uint access) {
+            IntPtr h = CreateFileW(directory, access, 0x7u, IntPtr.Zero, 3u, 0x02000000u, IntPtr.Zero);
+            if (h.ToInt64() == -1) {
+                int err = Marshal.GetLastWin32Error();
+                return (err == 0) ? -1 : err;
+            }
+            CloseHandle(h);
+            return 0;
         }
     }
 }
@@ -335,7 +426,7 @@ function Resolve-ServerInput {
 function Read-ServerNames {
     param([bool]$First)
     while ($true) {
-        $prompt = if ($First) { 'Input server name (e.g. server1.example.com)' }
+        $prompt = if ($First) { 'Input server name (e.g. ozssu02.muv.is.keysight.com)' }
                   else        { 'Input another server name (or press Enter to exit)' }
         $raw = Read-Host $prompt
         if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
@@ -441,6 +532,30 @@ function Get-Win32ErrorText {
     }
 }
 
+function Get-MyBroadSids {
+    # The broad groups this account is CERTAINLY a member of on any server it
+    # authenticates to. Used to decide what a refused write proves: if the ACL hands
+    # write to one of these and the server still says no, the block applies to that
+    # whole group, not just to this account.
+    #   Everyone / Authenticated Users / NETWORK -- every authenticated SMB session
+    #   is in these, wherever it connects.
+    #   Domain Users -- this account's OWN domain only; another domain's Domain Users
+    #   on an ACL says nothing about this account.
+    # BUILTIN\Users is deliberately NOT included: on a remote server that is the
+    # server's own local group, which this machine's token cannot vouch for.
+    $sids = New-Object System.Collections.Generic.List[string]
+    $sids.Add('S-1-1-0')
+    $sids.Add('S-1-5-11')
+    $sids.Add('S-1-5-2')
+    try {
+        $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        foreach ($g in $id.Groups) {
+            if ($g.Value -match '^S-1-5-21-\d+-\d+-\d+-513$') { $sids.Add($g.Value) }
+        }
+    } catch { }
+    return $sids.ToArray()
+}
+
 function Get-PrivilegedGroupNote {
     # Domain Admins (512), Schema Admins (518), Enterprise Admins (519): these
     # carry admin rights on member servers over the network, so a report run
@@ -480,7 +595,7 @@ function Get-PrivilegedGroupNote {
 # it needs is declared inside this scriptblock.
 # ---------------------------------------------------------------------------
 $ShareTestScript = {
-    param($Unc, $State, $ItemCap, $SampleCount)
+    param($Unc, $State, $ItemCap, $SampleCount, $TestWrite, $MyBroadSids)
 
     # Tell the supervisor when THIS share actually started (the pool may queue
     # jobs, so the timeout has to run from start, not from submission).
@@ -540,7 +655,7 @@ $ShareTestScript = {
     $res = [ordered]@{
         Unc = $Unc; Status = 'Error'; Detail = ''; Items = $null; ItemsCapped = $false
         Sample = @(); Owner = ''; BroadAccess = @(); AccessList = @(); BroadWrite = $false
-        Exposure = ''; AclNote = ''
+        Exposure = ''; AclNote = ''; WriteAccess = ''; WriteDetail = ''
     }
 
     # ---- 1) can the share root be opened and listed? ----
@@ -588,12 +703,84 @@ $ShareTestScript = {
         }
     }
 
-    # ---- 2) owner + root ACL exposure (only for shares that opened) ----
+    # ---- 2) verified write access (nothing is created -- see WriteProbe) ----
+    if ($res.Status -eq 'Accessible') {
+        if ($TestWrite) {
+            try {
+                # Asked in decreasing order of usefulness. "Folders only" is a real
+                # finding, not a near miss: a folder created here belongs to the account
+                # that created it, which can then write files inside it. C:\ on a stock
+                # Windows box behaves exactly like that, and so do plenty of shares.
+                # Each right is asked for on its own because a server that refuses the
+                # combined mask may still grant one of them.
+                # Do NOT widen this to "any write-ish right": NAS firmware hands out
+                # FILE_WRITE_ATTRIBUTES (and sometimes FILE_WRITE_EA) on shares where it
+                # refuses every actual write, so a broader mask marks everything writable.
+                # Creating a file or a folder is the only thing worth calling writable.
+                $attempts = @(
+                    @{ Mask = [uint32](0x2 -bor 0x4); What = 'files and folders can be created in the share root' },
+                    @{ Mask = [uint32]0x2;            What = 'files can be created in the share root' },
+                    @{ Mask = [uint32]0x4;            What = 'folders only - a folder created here is owned by this account, which can then write files inside it' }
+                )
+                $granted = ''
+                $refused = $false
+                $protect = $false
+                $oddCode = 0
+                foreach ($a in $attempts) {
+                    # Windows, Samba and NAS firmware do not all accept the same path
+                    # form for a share root, so an inconclusive answer is retried with a
+                    # trailing separator before the mask is given up on.
+                    foreach ($path in @($Unc, ($Unc + '\'))) {
+                        $c = [SmbOpenShare.WriteProbe]::Probe($path, $a.Mask)
+                        if ($c -eq 0)                  { $granted = $a.What; break }
+                        if ($c -eq 5 -or $c -eq 1314)  { $refused = $true;   break }
+                        if ($c -eq 19)                 { $refused = $true; $protect = $true; break }
+                        if ($oddCode -eq 0) { $oddCode = $c }   # inconclusive: try the other path form
+                    }
+                    if ($granted) { break }
+                }
+                if ($granted) {
+                    $res.WriteAccess = 'Yes'
+                    $res.WriteDetail = 'The server granted write access: ' + $granted
+                } elseif ($protect) {
+                    $res.WriteAccess = 'No'
+                    $res.WriteDetail = 'The volume behind the share is write-protected'
+                } elseif ($refused) {
+                    $res.WriteAccess = 'No'
+                    $res.WriteDetail = 'The server refused every form of write access (create file, create folder)'
+                } else {
+                    $res.WriteAccess = 'Unknown'
+                    $txt = "Win32 error $oddCode"
+                    try { $txt = (New-Object System.ComponentModel.Win32Exception($oddCode)).Message + " (Win32 error $oddCode)" } catch { }
+                    $res.WriteDetail = 'Write check did not complete: ' + $txt
+                }
+            } catch {
+                $exW = Get-RealEx $_
+                $res.WriteAccess = 'Unknown'
+                $res.WriteDetail = 'Write check failed: ' + ([string]$exW.Message).Trim()
+            }
+        } else {
+            $res.WriteAccess = 'Skipped'
+            $res.WriteDetail = 'Write check disabled (-NoWriteTest)'
+        }
+        # Published before the (slower) ACL phase for the same reason as '|listed':
+        # a timeout during SID lookups must not throw away a proven write result.
+        $State[$Unc + '|write'] = @{ Access = $res.WriteAccess; Detail = $res.WriteDetail }
+    }
+
+    # ---- 3) owner + root ACL exposure (only for shares that opened) ----
     if ($res.Status -eq 'Accessible') {
         try {
             $acl     = Get-Acl -LiteralPath $Unc -ErrorAction Stop
             $sidType = [System.Security.Principal.SecurityIdentifier]
             try { $res.Owner = Get-SidName ($acl.GetOwner($sidType)) } catch { }
+
+            # A NULL DACL means "no access control at all" -- every account has full
+            # control. Some NAS and Samba exports hand one out. GetAccessRules() returns
+            # NOTHING for it, which would be rated LIMITED: the exact opposite of the
+            # truth. Detect it from the SDDL and treat it as Everyone: FullControl.
+            $nullDacl = $false
+            try { $nullDacl = [bool]($acl.Sddl -match 'D:[A-Z]*NO_ACCESS_CONTROL') } catch { }
 
             $best = @{}
             $deny = 0
@@ -617,6 +804,9 @@ $ShareTestScript = {
 
             $broad = New-Object System.Collections.Generic.List[string]
             $all   = New-Object System.Collections.Generic.List[string]
+            # Broad groups with write that this account is certainly a member of over
+            # SMB. Used below to tell a real BROAD-WRITE from one the server blocks.
+            $writersWithMe = New-Object System.Collections.Generic.List[string]
             $i = 0
             foreach ($b in $ordered) {
                 $i++
@@ -625,11 +815,21 @@ $ShareTestScript = {
                 $nm = if ($isBroad -or $i -le 12) { Get-SidName $b.Sid } else { '' }
                 if ($isBroad) {
                     $broad.Add(('{0}: {1}' -f $nm, $b.Label))
-                    if ($b.Rank -ge 2) { $res.BroadWrite = $true }
+                    if ($b.Rank -ge 2) {
+                        $res.BroadWrite = $true
+                        if ($MyBroadSids -contains $b.Sid.Value) { $writersWithMe.Add($nm) }
+                    }
                 }
                 if ($i -le 12) { $all.Add(('{0}: {1}' -f $nm, $b.Label)) }
             }
             if ($ordered.Count -gt 12) { $all.Add(('+{0} more' -f ($ordered.Count - 12))) }
+
+            if ($nullDacl) {
+                $broad.Add('Everyone: FullControl (share root has NO access control list)')
+                $all.Add('Everyone: FullControl (share root has NO access control list)')
+                $res.BroadWrite = $true
+                $writersWithMe.Add('Everyone')
+            }
 
             $res.BroadAccess = $broad.ToArray()
             $res.AccessList  = $all.ToArray()
@@ -638,9 +838,25 @@ $ShareTestScript = {
             } else {
                 $res.Exposure = 'LIMITED'
             }
-            if ($deny -gt 0) {
-                $res.AclNote = ('{0} deny entr{1} on root ACL - review manually' -f $deny, $(if ($deny -eq 1) { 'y' } else { 'ies' }))
+
+            $notes = New-Object System.Collections.Generic.List[string]
+            # The correction that keeps BROAD-WRITE honest: the root ACL grants write to
+            # a group this account is definitely in, yet the server refused a write
+            # handle. Whatever is blocking it -- share-level permissions, a deny entry,
+            # a read-only volume -- applies to that whole group, not just to this
+            # account, so the ACL's "everyone can write" is not true in practice.
+            if ($res.Exposure -eq 'BROAD-WRITE' -and $res.WriteAccess -eq 'No' -and $writersWithMe.Count -gt 0) {
+                $res.Exposure = 'BROAD-READ'
+                $notes.Add(('Root ACL grants write to {0}, but the server refused write access: share-level permissions, a deny entry or a read-only volume block it for that whole group. Rated BROAD-READ, not BROAD-WRITE.' -f ($writersWithMe -join ', ')))
+            } elseif ($res.Exposure -eq 'BROAD-WRITE' -and $res.WriteAccess -eq 'No') {
+                $notes.Add('Root ACL grants write to a broad group this account is not in; this account itself was refused write access, so the broad write is unverified.')
+            } elseif ($res.Exposure -ne 'BROAD-WRITE' -and $res.WriteAccess -eq 'Yes') {
+                $notes.Add('This account can write here even though no broad group has write on the root ACL - check which group grants it.')
             }
+            if ($deny -gt 0) {
+                $notes.Add(('{0} deny entr{1} on root ACL - review manually' -f $deny, $(if ($deny -eq 1) { 'y' } else { 'ies' })))
+            }
+            $res.AclNote = ($notes -join ' ')
         } catch {
             $ex2 = Get-RealEx $_
             $res.Exposure = 'UNKNOWN'
@@ -657,7 +873,7 @@ function New-ShareResult {
     return [PSCustomObject][ordered]@{
         Unc = $Unc; Status = $Status; Detail = $Detail; Items = $null; ItemsCapped = $false
         Sample = @(); Owner = ''; BroadAccess = @(); AccessList = @(); BroadWrite = $false
-        Exposure = ''; AclNote = ''
+        Exposure = ''; AclNote = ''; WriteAccess = ''; WriteDetail = ''
     }
 }
 
@@ -674,6 +890,8 @@ function Invoke-ShareAccessTests {
         [int]$TimeoutSec,
         [int]$ItemCap,
         [int]$SampleCount,
+        [bool]$TestWrite,
+        [string[]]$MyBroadSids,
         [string]$Activity,
         [scriptblock]$Worker = $ShareTestScript
     )
@@ -693,7 +911,7 @@ function Invoke-ShareAccessTests {
         foreach ($unc in $UncPaths) {
             $ps = [System.Management.Automation.PowerShell]::Create()
             $ps.RunspacePool = $pool
-            [void]$ps.AddScript($Worker).AddArgument($unc).AddArgument($state).AddArgument($ItemCap).AddArgument($SampleCount)
+            [void]$ps.AddScript($Worker).AddArgument($unc).AddArgument($state).AddArgument($ItemCap).AddArgument($SampleCount).AddArgument($TestWrite).AddArgument($MyBroadSids)
             $jobs.Add([PSCustomObject]@{ Unc = $unc; Pipe = $ps; Handle = $ps.BeginInvoke(); Done = $false; TimedOut = $false })
         }
 
@@ -736,6 +954,16 @@ function Invoke-ShareAccessTests {
                         $t.ItemsCapped = $lk.Capped
                         $t.Exposure = 'UNKNOWN'
                         $t.AclNote = "Owner/ACL lookup did not finish within ${TimeoutSec}s"
+                        # Same reasoning: a write answer already obtained is a fact, so
+                        # keep it even though the slower ACL phase ran out of time.
+                        $wk = $state[$j.Unc + '|write']
+                        if ($wk) {
+                            $t.WriteAccess = $wk.Access
+                            $t.WriteDetail = $wk.Detail
+                        } else {
+                            $t.WriteAccess = 'Unknown'
+                            $t.WriteDetail = "Write check did not finish within ${TimeoutSec}s"
+                        }
                     }
                     $results[$j.Unc] = $t
                     $j.Done = $true
@@ -818,6 +1046,25 @@ function Get-ExposureText {
     }
 }
 
+function Get-WriteText {
+    param($Row)
+    switch ($Row.WriteAccess) {
+        'Yes'     { return 'WRITE CONFIRMED' }
+        'No'      { return 'no write (verified)' }
+        'Unknown' { return 'write UNVERIFIED (' + $Row.WriteDetail + ')' }
+        default   { return '' }   # Skipped / not applicable
+    }
+}
+
+function Get-RowColor {
+    # A verified write is the finding to act on, whatever the ACL said -- except on
+    # Windows default shares, which are not rated at all (the admin warning covers
+    # being able to write to C$).
+    param($Row)
+    if ($Row.WriteAccess -eq 'Yes' -and $Row.Exposure -ne 'DEFAULT') { return 'Red' }
+    return $ExposureColor[$Row.Exposure]
+}
+
 function Get-SortedAccessible {
     param($Rows)
     # NB: a 1-element result unrolls to a bare object on return, and a bare
@@ -827,6 +1074,7 @@ function Get-SortedAccessible {
     return @($Rows | Where-Object { $_.Status -eq 'Accessible' } | Sort-Object `
         @{ Expression = { if ($_.Kind -eq 'Custom') { 0 } else { 1 } } }, `
         @{ Expression = { $ExposureRank[$_.Exposure] } }, `
+        @{ Expression = { if ($_.WriteAccess -eq 'Yes') { 0 } else { 1 } } }, `
         @{ Expression = { $_.Share } })
 }
 
@@ -857,7 +1105,14 @@ function Build-TextReport {
     Add-Line $L (" Scanned as   : {0}" -f $Info.ScannedAs)
     Add-Line $L (" Scan time    : {0}" -f $Info.ScanTime)
     Add-Line $L " Method       : Read-only. Shares listed with NetShareEnum; each disk share root"
-    Add-Line $L "                opened for listing with the account above. Nothing was written."
+    if ($Info.WriteTested) {
+        Add-Line $L "                opened for listing with the account above, then asked whether it"
+        Add-Line $L "                would grant write access. Nothing was created, written or deleted."
+    } else {
+        Add-Line $L "                opened for listing with the account above. Nothing was written."
+        Add-Line $L "                The write check was DISABLED (-NoWriteTest), so the exposure"
+        Add-Line $L "                ratings below come from the root ACL alone." 'Yellow'
+    }
     if ($Info.Warning) {
         Add-Line $L ''
         Add-Line $L (" [!] NOTE: {0}" -f $Info.Warning) 'Yellow'
@@ -867,6 +1122,15 @@ function Build-TextReport {
     Add-Line $L (Format-Leader 'Shares on server' $Rows.Count)
     $accColor = if ($acc.Count -gt 0 -or $cant.Count -gt 0) { 'Yellow' } else { 'Green' }
     Add-Line $L (Format-Leader 'ACCESSIBLE (open)' ("{0}{1}" -f $acc.Count, $(if ($acc.Count -gt 0) { '   <-- listed below' } else { '' }))) $accColor
+    $writable   = @($acc | Where-Object { $_.WriteAccess -eq 'Yes' })
+    $unverified = @($acc | Where-Object { $_.WriteAccess -eq 'Unknown' })
+    if (@($acc | Where-Object { $_.WriteAccess -and $_.WriteAccess -ne 'Skipped' }).Count -gt 0) {
+        $wColor = if ($writable.Count -gt 0) { 'Red' } else { 'Green' }
+        Add-Line $L (Format-Leader 'WRITABLE (verified)' ("{0}   (this account can create files)" -f $writable.Count)) $wColor
+        if ($unverified.Count -gt 0) {
+            Add-Line $L (Format-Leader 'Write unverified' ("{0}   (check did not complete)" -f $unverified.Count)) 'Yellow'
+        }
+    }
     Add-Line $L (Format-Leader 'Access denied' $denied.Count)
     if ($cant.Count -gt 0) {
         Add-Line $L (Format-Leader 'COULD NOT BE TESTED' ("{0}   (offline / timeout / error)" -f $cant.Count)) 'Yellow'
@@ -890,10 +1154,13 @@ function Build-TextReport {
             $tags = ''
             if ($r.Kind -ne 'Custom') { $tags += '  [default/system share]' }
             if ($r.Hidden)            { $tags += '  [hidden: name ends in $]' }
-            $color = $ExposureColor[$r.Exposure]
+            $color = Get-RowColor $r
             Add-Line $L ('{0,3}. {1}{2}' -f $n, $r.UNCPath, $tags) 'White'
             # NB: each element is parenthesised -- the comma operator binds tighter than '+'.
-            $parts = @(('Exposure: ' + (Get-ExposureText $r)), ('Items: ' + (Get-ItemsText $r)))
+            $parts = @(('Exposure: ' + (Get-ExposureText $r)))
+            $wt = Get-WriteText $r
+            if ($wt) { $parts += ('Write: ' + $wt) }
+            $parts += ('Items: ' + (Get-ItemsText $r))
             if ($r.Owner) { $parts += ('Owner: ' + $r.Owner) }
             Add-Line $L ('       ' + ($parts -join '  |  ')) $color
             if ($r.Comment)  { Add-Line $L ('       Comment : ' + $r.Comment) 'Gray' }
@@ -923,10 +1190,23 @@ function Build-TextReport {
     Add-Line $L '  - "Accessible" = the account above could open and list the share root. It says'
     Add-Line $L '    nothing about other accounts; run as a standard domain user for an "open to'
     Add-Line $L '    all staff" view.'
-    Add-Line $L '  - Exposure comes from the root folder NTFS ACL (share-level permissions and deny'
-    Add-Line $L '    entries are not evaluated). BROAD-WRITE is a strong indicator, not proof.'
-    Add-Line $L '    LIMITED only means no Everyone/Authenticated Users/Domain Users/Users entry --'
-    Add-Line $L '    a large group can still be listed; review who is on the ACL (see the .csv/.html).'
+    Add-Line $L '  - Exposure comes from the root folder NTFS ACL. LIMITED only means no Everyone/'
+    Add-Line $L '    Authenticated Users/Domain Users/Users entry -- a large group can still be'
+    Add-Line $L '    listed; review who is on the ACL (see the .csv/.html).'
+    if ($Info.WriteTested) {
+        Add-Line $L '  - "WRITE CONFIRMED" is verified, not inferred: the server was asked for a'
+        Add-Line $L '    write-capable handle on the share root and granted one (the handle was closed'
+        Add-Line $L '    immediately; nothing was created). It answers for THIS account only.'
+        Add-Line $L '  - A root ACL can say Everyone:FullControl while the share is still read-only --'
+        Add-Line $L '    share-level permissions, a deny entry or a read-only volume override it, and'
+        Add-Line $L '    that is common on NAS appliances and Samba servers. Those shares are rated'
+        Add-Line $L '    BROAD-READ here, with the reason in the Note line, instead of BROAD-WRITE.'
+    } else {
+        Add-Line $L '  - The write check was disabled, so BROAD-WRITE here means only that the root'
+        Add-Line $L '    ACL grants write to a broad group. Share-level permissions, deny entries and'
+        Add-Line $L '    read-only volumes override that and are NOT evaluated in this run: re-run'
+        Add-Line $L '    without -NoWriteTest to find out which of these shares really are writable.'
+    }
     if (@($acc | Where-Object { $_.Exposure -eq 'DEFAULT' }).Count -gt 0) {
         Add-Line $L '  - Default shares are not rated: opening C$/ADMIN$ means this account has admin'
         Add-Line $L '    rights on the server; NETLOGON/SYSVOL/PRINT$ are open to users by design.'
@@ -977,6 +1257,9 @@ table.data td{padding:5px 8px;border:1px solid #d5d8dc;vertical-align:top}
 .br{background:#fcf3cf;font-weight:bold}
 .lim{background:#eaf2f8}
 .unk{background:#f2f3f4}
+.wyes{background:#f5b7b1;font-weight:bold;white-space:nowrap}
+.wno{background:#eafaf1;white-space:nowrap}
+.wunk{background:#f2f3f4;font-size:12px}
 .warn{background:#fcf3cf;border:1px solid #f1c40f;padding:8px;margin:10px 0}
 .small{color:#566573;font-size:12px}
 .mono{font-family:Consolas,monospace}
@@ -988,7 +1271,11 @@ table.data td{padding:5px 8px;border:1px solid #d5d8dc;vertical-align:top}
     [void]$sb.AppendLine(('<tr><td><b>Server</b></td><td>{0}</td></tr>' -f (& $h ($Info.Server + $addr))))
     [void]$sb.AppendLine(('<tr><td><b>Scanned as</b></td><td>{0}</td></tr>' -f (& $h $Info.ScannedAs)))
     [void]$sb.AppendLine(('<tr><td><b>Scan time</b></td><td>{0}</td></tr>' -f (& $h $Info.ScanTime)))
-    [void]$sb.AppendLine('<tr><td><b>Method</b></td><td>Read-only. Shares listed with NetShareEnum; each disk share root opened for listing with the account above. Nothing was written.</td></tr>')
+    if ($Info.WriteTested) {
+        [void]$sb.AppendLine('<tr><td><b>Method</b></td><td>Read-only. Shares listed with NetShareEnum; each disk share root opened for listing with the account above, then asked whether it would grant write access. Nothing was created, written or deleted.</td></tr>')
+    } else {
+        [void]$sb.AppendLine('<tr><td><b>Method</b></td><td>Read-only. Shares listed with NetShareEnum; each disk share root opened for listing with the account above. Nothing was written. <b>The write check was disabled (-NoWriteTest)</b>, so the exposure ratings come from the root ACL alone.</td></tr>')
+    }
     [void]$sb.AppendLine('</table>')
     if ($Info.Warning) {
         [void]$sb.AppendLine(('<div class="warn"><b>Note:</b> {0}</div>' -f (& $h $Info.Warning)))
@@ -997,6 +1284,14 @@ table.data td{padding:5px 8px;border:1px solid #d5d8dc;vertical-align:top}
     [void]$sb.AppendLine('<h2>Summary</h2><table class="meta">')
     [void]$sb.AppendLine(('<tr><td>Shares on server</td><td><b>{0}</b></td></tr>' -f $Rows.Count))
     [void]$sb.AppendLine(('<tr><td>Accessible (open)</td><td><b>{0}</b></td></tr>' -f $acc.Count))
+    if (@($acc | Where-Object { $_.WriteAccess -and $_.WriteAccess -ne 'Skipped' }).Count -gt 0) {
+        $writableCount   = @($acc | Where-Object { $_.WriteAccess -eq 'Yes' }).Count
+        $unverifiedCount = @($acc | Where-Object { $_.WriteAccess -eq 'Unknown' }).Count
+        [void]$sb.AppendLine(('<tr><td>Writable (verified - this account can create files)</td><td><b>{0}</b></td></tr>' -f $writableCount))
+        if ($unverifiedCount -gt 0) {
+            [void]$sb.AppendLine(('<tr><td>Write unverified (check did not complete)</td><td>{0}</td></tr>' -f $unverifiedCount))
+        }
+    }
     [void]$sb.AppendLine(('<tr><td>Access denied</td><td>{0}</td></tr>' -f $denied.Count))
     [void]$sb.AppendLine(('<tr><td>Could not be tested (offline / timeout / error)</td><td>{0}</td></tr>' -f $cant.Count))
     [void]$sb.AppendLine(('<tr><td>Not folder shares (IPC / printer)</td><td>{0}</td></tr>' -f $notDisk.Count))
@@ -1008,7 +1303,7 @@ table.data td{padding:5px 8px;border:1px solid #d5d8dc;vertical-align:top}
     } elseif ($acc.Count -eq 0) {
         [void]$sb.AppendLine(('<p>None - no share on this server could be opened by {0}.</p>' -f (& $h $Info.ScannedAs)))
     } else {
-        [void]$sb.AppendLine('<table class="data"><tr><th>#</th><th>Share</th><th>Exposure</th><th>Items</th><th>Owner</th><th>Comment</th></tr>')
+        [void]$sb.AppendLine('<table class="data"><tr><th>#</th><th>Share</th><th>Exposure</th><th>Write</th><th>Items</th><th>Owner</th><th>Comment</th></tr>')
         $n = 0
         foreach ($r in $acc) {
             $n++
@@ -1023,10 +1318,18 @@ table.data td{padding:5px 8px;border:1px solid #d5d8dc;vertical-align:top}
             # goes on its own full-width row so the table stays narrow enough for email.
             $broadCell = ''
             if ($r.BroadAccess) { $broadCell = '<br><span class="small">' + (& $h $r.BroadAccess) + '</span>' }
-            [void]$sb.AppendLine(('<tr><td>{0}</td><td class="mono">{1}{2}</td><td class="{3}">{4}{5}</td><td style="white-space:nowrap">{6}</td><td>{7}</td><td>{8}</td></tr>' -f `
-                $n, (& $h $r.UNCPath), $kind, $expClass[$r.Exposure], (& $h $r.Exposure), $broadCell, $itemsCell, (& $h $r.Owner), ((& $h $r.Comment) + $notes)))
+            switch ($r.WriteAccess) {
+                'Yes'     { $wClass = 'wyes';  $wText = 'WRITE CONFIRMED' }
+                'No'      { $wClass = 'wno';   $wText = 'no write' }
+                'Unknown' { $wClass = 'wunk';  $wText = 'unverified' }
+                'Skipped' { $wClass = 'wunk';  $wText = 'not checked' }
+                default   { $wClass = 'wunk';  $wText = '-' }
+            }
+            [void]$sb.AppendLine(('<tr><td>{0}</td><td class="mono">{1}{2}</td><td class="{3}">{4}{5}</td><td class="{6}">{7}</td><td style="white-space:nowrap">{8}</td><td>{9}</td><td>{10}</td></tr>' -f `
+                $n, (& $h $r.UNCPath), $kind, $expClass[$r.Exposure], (& $h $r.Exposure), $broadCell, `
+                $wClass, (& $h $wText), $itemsCell, (& $h $r.Owner), ((& $h $r.Comment) + $notes)))
             if ($r.AccessList) {
-                [void]$sb.AppendLine(('<tr><td></td><td colspan="5" class="small">Root ACL: {0}</td></tr>' -f (& $h $r.AccessList)))
+                [void]$sb.AppendLine(('<tr><td></td><td colspan="6" class="small">Root ACL: {0}</td></tr>' -f (& $h $r.AccessList)))
             }
         }
         [void]$sb.AppendLine('</table>')
@@ -1049,7 +1352,13 @@ table.data td{padding:5px 8px;border:1px solid #d5d8dc;vertical-align:top}
 
     [void]$sb.AppendLine('<h2>Notes</h2><ul class="small">')
     [void]$sb.AppendLine('<li>"Accessible" means the scanning account could open and list the share root. It says nothing about other accounts; run as a standard domain user for an "open to all staff" view.</li>')
-    [void]$sb.AppendLine('<li>Exposure comes from the root folder NTFS ACL. Share-level permissions and deny entries are not evaluated, so BROAD-WRITE is a strong indicator, not proof. LIMITED only means there is no Everyone / Authenticated Users / Domain Users / Users entry - a large group can still be listed, so review who is on the ACL.</li>')
+    [void]$sb.AppendLine('<li>Exposure comes from the root folder NTFS ACL. LIMITED only means there is no Everyone / Authenticated Users / Domain Users / Users entry - a large group can still be listed, so review who is on the ACL.</li>')
+    if ($Info.WriteTested) {
+        [void]$sb.AppendLine('<li><b>WRITE CONFIRMED</b> is verified, not inferred: the server was asked for a write-capable handle on the share root and granted one. The handle was closed immediately and nothing was created. It answers for the scanning account only.</li>')
+        [void]$sb.AppendLine('<li>A root ACL can read Everyone:FullControl while the share is still read-only, because share-level permissions, a deny entry or a read-only volume override it - common on NAS appliances and Samba servers. Those shares are rated BROAD-READ here, with the reason in the note beside them, rather than reported as BROAD-WRITE.</li>')
+    } else {
+        [void]$sb.AppendLine('<li>The write check was disabled, so BROAD-WRITE here means only that the root ACL grants write to a broad group. Share-level permissions, deny entries and read-only volumes override that and were NOT evaluated in this run - re-run without -NoWriteTest to find out which of these shares really are writable.</li>')
+    }
     if (@($acc | Where-Object { $_.Exposure -eq 'DEFAULT' }).Count -gt 0) { [void]$sb.AppendLine('<li>Default shares are not rated: opening C$/ADMIN$ means the scanning account has admin rights on the server; NETLOGON/SYSVOL/PRINT$ are open to users by design.</li>') }
     [void]$sb.AppendLine('<li>"Access denied" means the root folder could not be listed (a traverse-only root reads as denied too). DFS links are not followed; Items counts only what this account can see. Unresolved names are deleted accounts or a domain this PC cannot resolve.</li>')
     [void]$sb.AppendLine('<li>A saved credential or an existing "net use" session to this server can override the "Scanned as" logon.</li>')
@@ -1073,6 +1382,7 @@ function Build-CsvText {
         [PSCustomObject][ordered]@{
             UNCPath       = ConvertTo-SafeCellValue $r.UNCPath
             Exposure      = $r.Exposure
+            WriteAccess   = $r.WriteAccess
             BroadAccess   = ConvertTo-SafeCellValue $r.BroadAccess
             Owner         = ConvertTo-SafeCellValue $r.Owner
             TopLevelItems = $r.TopLevelItems
@@ -1080,6 +1390,7 @@ function Build-CsvText {
             Status        = $r.Status
             Kind          = $r.Kind
             Hidden        = $r.Hidden
+            WriteDetail   = ConvertTo-SafeCellValue $r.WriteDetail
             AclNote       = ConvertTo-SafeCellValue $r.AclNote
             SampleEntries = ConvertTo-SafeCellValue $r.Sample
             Detail        = ConvertTo-SafeCellValue $r.Detail
@@ -1093,9 +1404,9 @@ function Build-CsvText {
     if (-not $out) {
         # Keep a header-only file instead of an empty one.
         $out = @([PSCustomObject][ordered]@{
-            UNCPath = ''; Exposure = ''; BroadAccess = ''; Owner = ''; TopLevelItems = ''; Comment = ''; Status = ''
-            Kind = ''; Hidden = ''; AclNote = ''; SampleEntries = ''; Detail = ''; ScannedAs = ''; ScanTime = ''
-            Server = ''; Share = ''; AccessList = ''
+            UNCPath = ''; Exposure = ''; WriteAccess = ''; BroadAccess = ''; Owner = ''; TopLevelItems = ''
+            Comment = ''; Status = ''; Kind = ''; Hidden = ''; WriteDetail = ''; AclNote = ''; SampleEntries = ''
+            Detail = ''; ScannedAs = ''; ScanTime = ''; Server = ''; Share = ''; AccessList = ''
         })
         return (($out | ConvertTo-Csv -NoTypeInformation) | Select-Object -First 1) -join "`r`n"
     }
@@ -1116,7 +1427,7 @@ function Invoke-ServerCheck {
 
     $script:AbandonedProbes = 0
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $summary = [PSCustomObject]@{ Server = $Name; Failed = $false; FailReason = ''; Total = 0; Accessible = 0; NotTested = 0; ReportFailed = $false; Files = @() }
+    $summary = [PSCustomObject]@{ Server = $Name; Failed = $false; FailReason = ''; Total = 0; Accessible = 0; Writable = 0; NotTested = 0; ReportFailed = $false; Files = @() }
 
     Write-Host ''
     Write-Host "[*] $Name" -ForegroundColor Cyan
@@ -1177,9 +1488,11 @@ function Invoke-ServerCheck {
     $disk = @($classified | Where-Object { $_.TypeName -eq 'disk' })
     $probe = @{}
     if ($disk.Count -gt 0) {
-        Write-Host ("    [*] Testing {0} disk share(s): {1} parallel, {2}s timeout each (read-only)..." -f $disk.Count, [math]::Min($ShareThreads, $disk.Count), $ShareTimeoutSec)
+        $howText = if ($NoWriteTest) { 'read-only, no write check' } else { 'read-only, incl. write check' }
+        Write-Host ("    [*] Testing {0} disk share(s): {1} parallel, {2}s timeout each ({3})..." -f $disk.Count, [math]::Min($ShareThreads, $disk.Count), $ShareTimeoutSec, $howText)
         $probe = Invoke-ShareAccessTests -UncPaths @($disk | ForEach-Object { $_.Unc }) -Threads $ShareThreads `
-            -TimeoutSec $ShareTimeoutSec -ItemCap $MaxItemsCounted -SampleCount $SampleCount -Activity "Testing shares on $Name"
+            -TimeoutSec $ShareTimeoutSec -ItemCap $MaxItemsCounted -SampleCount $SampleCount `
+            -TestWrite (-not $NoWriteTest) -MyBroadSids $script:MyBroadSids -Activity "Testing shares on $Name"
     }
 
     # 6) assemble rows
@@ -1189,11 +1502,13 @@ function Invoke-ServerCheck {
         if ($c.TypeName -eq 'disk' -and $probe.ContainsKey($c.Unc)) { $p = $probe[$c.Unc] }
         $status = 'NotDisk'; $detail = "Not a folder share ($($c.TypeName))"
         $exposure = ''; $broad = ''; $acl = ''; $owner = ''; $items = ''; $sample = ''; $aclNote = ''
+        $writeAccess = ''; $writeDetail = ''
         if ($c.TypeName -eq 'disk') {
             if ($p) {
                 $status = $p.Status; $detail = $p.Detail
                 $exposure = $p.Exposure; $broad = ($p.BroadAccess -join '; '); $acl = ($p.AccessList -join '; ')
                 $owner = $p.Owner; $aclNote = $p.AclNote
+                $writeAccess = $p.WriteAccess; $writeDetail = $p.WriteDetail
                 if ($null -ne $p.Items) { $items = [string]$p.Items; if ($p.ItemsCapped) { $items += '+' } }
                 $sample = ($p.Sample -join ', ')
             } else {
@@ -1203,7 +1518,10 @@ function Invoke-ServerCheck {
             # share-level ACL, so the root NTFS ACL says nothing useful about who can
             # reach them -- don't rate them. Being able to open one mostly shows the
             # scanning account's own privilege level.
-            if ($status -eq 'Accessible' -and $c.Kind -ne 'Custom') { $exposure = 'DEFAULT'; $broad = '' }
+            # The ACL note explains a rating ("rated BROAD-READ, not BROAD-WRITE") that no
+            # longer applies once the share is DEFAULT, so it goes with the rating.
+            # WriteAccess stays: being able to write to C$ is worth seeing.
+            if ($status -eq 'Accessible' -and $c.Kind -ne 'Custom') { $exposure = 'DEFAULT'; $broad = ''; $aclNote = '' }
         }
         # Everything the remote server supplied is stripped of control characters for
         # display/report purposes. (The raw UNC was already used for probing above.)
@@ -1212,6 +1530,7 @@ function Invoke-ServerCheck {
             ShareType = $c.TypeName; Kind = $c.Kind; Hidden = $c.Hidden
             Comment = (ConvertTo-PrintableText $c.Remark); Status = $status; Detail = (ConvertTo-PrintableText $detail)
             Exposure = $exposure; BroadAccess = (ConvertTo-PrintableText $broad)
+            WriteAccess = $writeAccess; WriteDetail = (ConvertTo-PrintableText $writeDetail)
             AccessList = (ConvertTo-PrintableText $acl); Owner = (ConvertTo-PrintableText $owner); TopLevelItems = $items
             Sample = (ConvertTo-PrintableText $sample); AclNote = (ConvertTo-PrintableText $aclNote)
             ScannedAs = $scannedAs; ScanTime = $scanTime
@@ -1232,6 +1551,7 @@ function Invoke-ServerCheck {
     $info = [PSCustomObject]@{
         Title = 'SMB OPEN-SHARE REPORT'; Server = $Name; Addresses = $dns.Display
         ScannedAs = $scannedAs; ScanTime = $scanTime; Warning = $warning
+        WriteTested = (-not $NoWriteTest)
     }
 
     # 7) terminal report (accessible only unless -ShowAll)
@@ -1243,6 +1563,7 @@ function Invoke-ServerCheck {
 
     $summary.Total      = $rowsArr.Count
     $summary.Accessible = @($rowsArr | Where-Object { $_.Status -eq 'Accessible' }).Count
+    $summary.Writable   = @($rowsArr | Where-Object { $_.Status -eq 'Accessible' -and $_.WriteAccess -eq 'Yes' }).Count
     $summary.NotTested  = @($rowsArr | Where-Object { $CantStatuses -contains $_.Status }).Count
 
     # 8) files
@@ -1281,7 +1602,9 @@ function Invoke-ServerCheck {
     $sw.Stop()
     $doneColor = if ($summary.NotTested -gt 0) { 'Yellow' } else { 'Green' }
     $notTestedText = if ($summary.NotTested -gt 0) { ", $($summary.NotTested) NOT tested" } else { '' }
-    Write-Host ("[*] {0}: done in {1:N1}s -- {2} of {3} share(s) accessible{4}." -f $Name, $sw.Elapsed.TotalSeconds, $summary.Accessible, $summary.Total, $notTestedText) -ForegroundColor $doneColor
+    $writableText  = if ($summary.Writable -gt 0) { ", $($summary.Writable) WRITABLE" } else { '' }
+    if ($summary.Writable -gt 0) { $doneColor = 'Red' }
+    Write-Host ("[*] {0}: done in {1:N1}s -- {2} of {3} share(s) accessible{4}{5}." -f $Name, $sw.Elapsed.TotalSeconds, $summary.Accessible, $summary.Total, $writableText, $notTestedText) -ForegroundColor $doneColor
     if ($script:AbandonedProbes -gt 0) {
         Write-Host ("[!] {0} share probe(s) hung and were abandoned; a window started with 'powershell -File' may take up to ~1 minute to close." -f $script:AbandonedProbes) -ForegroundColor Yellow
     }
@@ -1308,6 +1631,7 @@ if ($unknownParams.Count -gt 0) {
     exit 1
 }
 
+$script:MyBroadSids    = Get-MyBroadSids
 $script:PrivilegedNote = Get-PrivilegedGroupNote
 if ($script:PrivilegedNote) {
     Write-Host "[!] $($script:PrivilegedNote)" -ForegroundColor Yellow
@@ -1400,9 +1724,10 @@ if ($summaries.Count -gt 1) {
         if ($s.Failed) {
             Write-Host (' {0}  FAILED: {1}' -f $s.Server.PadRight(44), $s.FailReason) -ForegroundColor Red
         } else {
-            $c = if ($s.Accessible -gt 0 -or $s.NotTested -gt 0) { 'Yellow' } else { 'Green' }
+            $c = if ($s.Writable -gt 0) { 'Red' } elseif ($s.Accessible -gt 0 -or $s.NotTested -gt 0) { 'Yellow' } else { 'Green' }
             $nt = if ($s.NotTested -gt 0) { ", $($s.NotTested) NOT tested" } else { '' }
-            Write-Host (' {0}  {1} accessible of {2} share(s){3}' -f $s.Server.PadRight(44), $s.Accessible, $s.Total, $nt) -ForegroundColor $c
+            $wr = if ($s.Writable -gt 0) { ", $($s.Writable) WRITABLE" } else { '' }
+            Write-Host (' {0}  {1} accessible of {2} share(s){3}{4}' -f $s.Server.PadRight(44), $s.Accessible, $s.Total, $wr, $nt) -ForegroundColor $c
         }
     }
 }
